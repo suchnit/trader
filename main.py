@@ -10,4 +10,6 @@ if __name__ == '__main__':
     symbols = get_bulk_data()
     signals = run_strategy(symbols)
     execute_trades(signals)
+
+    logger.info(f"✅ {len(symbols)} symbols analysed")
     logger.info("✅ Strategy execution completed")

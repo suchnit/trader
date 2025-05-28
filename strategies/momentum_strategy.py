@@ -3,6 +3,8 @@ import pandas as pd
 import pandas_ta as ta
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from loguru import logger
+import traceback
+import sys
 
 def sanitize_multicolumn_df(df):
     df.columns = [f"{col[0]}_{col[1]}" for col in df.columns]
@@ -10,18 +12,24 @@ def sanitize_multicolumn_df(df):
 
 def analyze_symbol(symbol):
     try:
-        print(f"Downloading data for: {symbol}")
         data = yf.download(symbol, period="6mo", interval="1d", progress=False)
-        print(f"Starting analysis for: {symbol}")
 
         # Flatten MultiIndex if present
         if isinstance(data.columns, pd.MultiIndex):
             data.columns = data.columns.droplevel(1)
 
+        # Drop duplicate columns
+        data = data.loc[:, ~data.columns.duplicated()]
+
+        # Basic checks
         if data.empty or len(data) < 50:
+            logger.warning(f"⚠️ Insufficient data for: {symbol}")
             return None
 
-        # Indicators
+        # Ensure numeric columns
+        data = data.apply(pd.to_numeric, errors='coerce')
+
+        # Add indicators
         data.ta.adx(high='High', low='Low', close='Close', append=True)
         data.ta.rsi(close='Close', append=True)
         data.ta.macd(close='Close', append=True)
@@ -32,16 +40,25 @@ def analyze_symbol(symbol):
 
         latest = data.iloc[-1]
 
-        adx = latest.get('ADX_14', 0)
-        rsi = latest.get('RSI_14', 100)
+        # Skip low-volume stocks
+        if latest['Volume'] < 100000 or latest['Close'] < 100:
+            return None
 
-        macd_hist = latest.get('MACDh_12_26_9', 0)
-        close = latest['Close']
-        lower_band = latest.get('BBL_20_2.0', 0)
-        upper_band = latest.get('BBU_20_2.0', 0)
-        ema20 = latest.get('EMA_20', 0)
-        ema50 = latest.get('EMA_50', 0)
-        stochrsi = latest.get('STOCHRSIk_14_14_3_3', 50)
+        def extract_float(val):
+            if isinstance(val, pd.Series):
+                return val.iloc[-1]
+            return float(val) if pd.notna(val) else 0
+
+        # Safely extract values
+        adx = extract_float(latest.get('ADX_14', 0))
+        rsi = extract_float(latest.get('RSI_14', 100))
+        macd_hist = extract_float(latest.get('MACDh_12_26_9', 0))
+        close = extract_float(latest['Close'])
+        lower_band = extract_float(latest.get('BBL_20_2.0', 0))
+        upper_band = extract_float(latest.get('BBU_20_2.0', 0))
+        ema20 = extract_float(latest.get('EMA_20', 0))
+        ema50 = extract_float(latest.get('EMA_50', 0))
+        stochrsi = extract_float(latest.get('STOCHRSIk_14_14_3_3', 50))
 
         buy_conditions = [
             adx > 20,
@@ -61,46 +78,21 @@ def analyze_symbol(symbol):
             stochrsi > 80
         ]
 
-        if sum(buy_conditions) >= 4:
+        buy_score = sum(buy_conditions)
+        sell_score = sum(sell_conditions)
+
+        if buy_score >= 3:
             logger.info(f"📈 BUY signal: {symbol}")
-            return {'symbol': symbol, 'action': 'BUY'}
-        elif sum(sell_conditions) >= 4:
+            return {'symbol': symbol, 'action': 'BUY', 'score': buy_score, 'close': close}
+        elif sell_score >= 4:
             logger.info(f"📉 SELL signal: {symbol}")
-            return {'symbol': symbol, 'action': 'SELL'}
+            return {'symbol': symbol, 'action': 'SELL', 'score': sell_score, 'close': close}
 
     except Exception as e:
-        logger.error(f"Error analyzing {symbol}: {e}")
-    print(f"Analysis done for: {symbol}")
+        logger.error(f"❌ Error analyzing {symbol}: {e}")
+        traceback.print_exc()
+
     return None
-
-
-# def analyze_symbol(symbol):
-#     try:
-#         print(f"Downloading data for: {symbol}")
-#         df = yf.download(symbol, period="6mo", interval="1d", progress=False)
-#         print(f"Starting analysis for: {symbol}")
-#         df = sanitize_multicolumn_df(df)
-#         if df.empty or len(df) < 15:
-#             return None
-#
-#         df = df.copy(deep=True)
-#         df.ta.adx(high='High', low='Low', close='Close', append=True)
-#         df.ta.rsi(close='Close', append=True)
-#
-#         latest = df.iloc[-1]
-#         adx = latest.get('ADX_14', 0)
-#         rsi = latest.get('RSI_14', 100)
-#
-#         if adx > 25 and rsi < 30:
-#             logger.info(f"📈 Signal generated: {symbol}")
-#             return symbol
-#         elif adx > 25 and rsi > 70:
-#             logger.info(f"📉 SELL signal: {symbol}")
-#             return {'symbol': symbol, 'action': 'SELL'}
-#     except Exception as e:
-#         logger.error(f"Error analyzing {symbol}: {e}")
-#     print(f"Analysis done for: {symbol}")
-#     return None
 
 def run_strategy(symbols):
     signals = []
