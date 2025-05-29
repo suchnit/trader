@@ -116,8 +116,8 @@ def analyze_symbol(symbol, verbose=False):
             logger.debug(f"{symbol} :: Sell Conditions: {sell_conditions} | Sell Score: {sell_score:.2f}")
             logger.debug(f"{symbol} :: ADX: {adx}, RSI: {rsi}, MACD_Hist: {macd_hist}, Close: {close}, EMA20: {ema20}, EMA50: {ema50}, EMA200: {ema200}, StochRSI: {stochrsi}")
 
-        logger.debug(
-            f"{symbol} - Close: {close}, EMA200: {ema200}, Slope: {ema_slope}, Uptrend: {in_uptrend}, Downtrend: {in_downtrend}")
+        # logger.debug(
+        #     f"{symbol} - Close: {close}, EMA200: {ema200}, Slope: {ema_slope}, Uptrend: {in_uptrend}, Downtrend: {in_downtrend}")
 
         if buy_score >= BUY_THRESHOLD and buy_score > sell_score and in_uptrend:
             logger.info(f"📈 BUY signal: {symbol}")
@@ -134,6 +134,14 @@ def analyze_symbol(symbol, verbose=False):
                 'symbol': symbol,
                 'action': 'SELL',
                 'score': round(sell_score, 2),
+                'close': close,
+                'version': 'adx_rsi_v2.5'
+            }
+        elif abs(buy_score - sell_score) < 0.5 and not in_uptrend and not in_downtrend:
+            return {
+                'symbol': symbol,
+                'action': 'WATCH',
+                'score': round(max(buy_score, sell_score), 2),
                 'close': close,
                 'version': 'adx_rsi_v2.5'
             }
