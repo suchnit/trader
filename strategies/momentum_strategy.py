@@ -5,7 +5,7 @@ import pandas_ta as ta
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from loguru import logger
 import traceback
-from config import BUY_THRESHOLD, SELL_THRESHOLD, TREND_DISTANCE_THRESHOLD, SLOPE_PCT_THRESHOLD
+from config import BUY_THRESHOLD, SELL_THRESHOLD, TREND_DISTANCE_THRESHOLD, SLOPE_PCT_THRESHOLD, ADX_THRESHOLD
 import sys
 
 def sanitize_multicolumn_df(df):
@@ -28,13 +28,7 @@ def detect_trend(data, close,ema200, ema_key='EMA_200', threshold=0.01, min_slop
 
 def analyze_symbol(symbol, verbose=False):
     try:
-        # Optional: Load from cache to speed up re-analysis
-        # cache_file = f"cache/{symbol}.csv"
-        # if os.path.exists(cache_file):
-        #     data = pd.read_csv(cache_file, index_col=0, parse_dates=True)
-        # else:
         data = yf.download(symbol, period="400d", interval="1d", progress=False)
-            # data.to_csv(cache_file)
 
         if isinstance(data.columns, pd.MultiIndex):
             data.columns = data.columns.droplevel(1)
@@ -45,12 +39,10 @@ def analyze_symbol(symbol, verbose=False):
             logger.warning(f"⚠️ Insufficient data for: {symbol}")
             return None
 
-        # Early exit: filter out low volume & cheap stocks
         latest = data.iloc[-1]
         if latest['Volume'] < 100_000 or latest['Close'] < 100:
             return None
 
-        # Add indicators
         data.ta.adx(high='High', low='Low', close='Close', append=True)
         data.ta.rsi(close='Close', append=True)
         data.ta.macd(close='Close', append=True)
@@ -60,7 +52,7 @@ def analyze_symbol(symbol, verbose=False):
         data.ta.ema(length=200, append=True)
         data.ta.stochrsi(close='Close', append=True)
 
-        if data.empty or len(data) < 250:  # Ensure enough data for EMA_200 and slope
+        if data.empty or len(data) < 250:
             logger.warning(f"⚠️ Not enough data for EMA200 + slope: {symbol}")
             return None
 
@@ -75,7 +67,6 @@ def analyze_symbol(symbol, verbose=False):
                 return val.iloc[-1]
             return float(val) if pd.notna(val) else 0
 
-        # Extract indicators safely
         adx = extract_float(latest.get('ADX_14', 0))
         rsi = extract_float(latest.get('RSI_14', 100))
         macd_hist = extract_float(latest.get('MACDh_12_26_9', 0))
@@ -88,36 +79,49 @@ def analyze_symbol(symbol, verbose=False):
         stochrsi = extract_float(latest.get('STOCHRSIk_14_14_3_3', 50))
         in_uptrend, in_downtrend, ema_slope = detect_trend(data, close, ema200)
 
-        # Weighted condition scores
-        weights = [1.0, 0.8, 1.2, 0.6, 1.0, 1.0]
+        def evaluate_momentum_signal(rsi, stochrsi):
+            if rsi < 30:
+                if stochrsi < 20:
+                    return 'buy'
+                else:
+                    return 'watchlist'
+            elif rsi > 70:
+                if stochrsi > 80:
+                    return 'sell'
+                else:
+                    return 'watchlist'
+            else:
+                return 'neutral'
+
+        momentum_rating = evaluate_momentum_signal(rsi, stochrsi)
+
+        if momentum_rating not in ['buy', 'sell'] and adx <= ADX_THRESHOLD:
+            if verbose:
+                logger.debug(f"{symbol} :: Skipping due to weak trend and no strong momentum signal (ADX: {adx}, Momentum: {momentum_rating})")
+            return None
 
         buy_conditions = [
-            adx > 20,
-            rsi < 30,
             macd_hist > 0,
             close < lower_band,
             ema20 > ema50,
-            stochrsi < 20
+            momentum_rating == 'buy'
         ]
+
         sell_conditions = [
-            adx > 20,
-            rsi > 70,
             macd_hist < 0,
             close > upper_band,
             ema20 < ema50,
-            stochrsi > 80
+            momentum_rating == 'sell'
         ]
 
+        weights = [1.2, 0.6, 1.0, 1.0]
         buy_score = sum(w if cond else 0 for w, cond in zip(weights, buy_conditions))
         sell_score = sum(w if cond else 0 for w, cond in zip(weights, sell_conditions))
 
         if verbose:
             logger.debug(f"{symbol} :: Buy Conditions: {buy_conditions} | Buy Score: {buy_score:.2f}")
             logger.debug(f"{symbol} :: Sell Conditions: {sell_conditions} | Sell Score: {sell_score:.2f}")
-            logger.debug(f"{symbol} :: ADX: {adx}, RSI: {rsi}, MACD_Hist: {macd_hist}, Close: {close}, EMA20: {ema20}, EMA50: {ema50}, EMA200: {ema200}, StochRSI: {stochrsi}")
-
-        # logger.debug(
-        #     f"{symbol} - Close: {close}, EMA200: {ema200}, Slope: {ema_slope}, Uptrend: {in_uptrend}, Downtrend: {in_downtrend}")
+            logger.debug(f"{symbol} :: ADX: {adx}, RSI: {rsi}, MACD_Hist: {macd_hist}, Close: {close}, EMA20: {ema20}, EMA50: {ema50}, EMA200: {ema200}, StochRSI: {stochrsi}, Momentum: {momentum_rating}")
 
         if buy_score >= BUY_THRESHOLD and buy_score > sell_score and in_uptrend:
             logger.info(f"📈 BUY signal: {symbol}")
@@ -126,7 +130,7 @@ def analyze_symbol(symbol, verbose=False):
                 'action': 'BUY',
                 'score': round(buy_score, 2),
                 'close': close,
-                'version': 'adx_rsi_v2.5'
+                'version': 'adx_rsi_v2.6'
             }
         elif sell_score >= SELL_THRESHOLD and sell_score > buy_score and in_downtrend:
             logger.info(f"📉 SELL signal: {symbol}")
@@ -135,7 +139,7 @@ def analyze_symbol(symbol, verbose=False):
                 'action': 'SELL',
                 'score': round(sell_score, 2),
                 'close': close,
-                'version': 'adx_rsi_v2.5'
+                'version': 'adx_rsi_v2.6'
             }
         elif abs(buy_score - sell_score) < 0.5 and not in_uptrend and not in_downtrend:
             return {
@@ -143,13 +147,14 @@ def analyze_symbol(symbol, verbose=False):
                 'action': 'WATCH',
                 'score': round(max(buy_score, sell_score), 2),
                 'close': close,
-                'version': 'adx_rsi_v2.5'
+                'version': 'adx_rsi_v2.6'
             }
     except Exception as e:
         logger.error(f"❌ Error analyzing {symbol}: {e}")
         traceback.print_exc()
 
     return None
+
 
 def run_strategy(symbols):
     signals = []
